@@ -6,6 +6,7 @@ import subprocess
 from sys import exit
 import threading
 from queue import Queue
+
 @click.group()
 def cli():
     pass
@@ -68,7 +69,30 @@ def get_fingerprint(command):
     else:
         pass
 
+def get_urls(command):
+    result=subprocess.Popen(command,shell=True,stderr=subprocess.PIPE,stdout=subprocess.PIPE)
+    stdout,stderr=result.communicate()
+    if result.returncode==0:
+        fp=stdout.decode('utf-8')
+        return fp
+    else:
+        pass
+
+def get_response(url,method):
+
+    if method=='GET':
+        response=requests.get(url=f'http://{url}')
+    elif method=='POST':
+        response=requests.post(url=f'http://{url}')
+
+        if response.status_code==200:
+            return response.text
+    else:
+        return "NOT FOUND"
+
+
 def get_ss(driver,sub):
+
     page=driver.get('http://'+sub)
     try:
         alert=driver.switch_to.alert
@@ -77,17 +101,19 @@ def get_ss(driver,sub):
         pass
     driver.save_screenshot(sub+'.png')
 
-
 def get_ports(command):
     try:
         print(command)
         process=subprocess.Popen(command,shell=True,stderr=subprocess.PIPE,stdout=subprocess.PIPE)
+        process.wait()
         stdout,stderror=process.communicate()
+
         if process.returncode==0:
             result=stdout.decode('utf-8')
             return result
         else:
             print(f"couldn't run command : {command}")
+
     except subprocess.CalledProcessError :
         print("couldn't run command")
 
@@ -107,31 +133,53 @@ def get_probe(subx,result):
         except:
             pass
 
+def probe_domain(domain):
+    res=requests.get(f"http://{domain}")
 
+    if res.status_code==404:
+        pass
 
-@cli.command()
+    else:
+        print(f"{BLUE}{domain}{END}---{BLINK}>>{END}{GREEN}[{res.status_code}]{GREEN} {YELLOW}[{res.headers.get('server','N/A')}]{END}")
+            
+@cli.command(help="Take ss of the list of subdomains")
 @click.option('-fn','--filename',help="filename containing subdomains")
+@click.option('-d','--domain',help="Name of a subdomain format:[-d subdomain.example.com]")
 @click.option('-t','--threads',help="Number of threads",default=3,type=int)
-def ss(filename,threads):
+def ss(filename,domain,threads):
     try:
-        with open(filename,'r') as sub_file:
-            subdomains=sub_file.read().splitlines()
-        subs=Queue()
-        drivers=[]
-        for sub in subdomains:
-            subs.put(sub)
-        def start(queue,drivers):
+        if filename:
+            with open(filename,'r') as sub_file:
+                subdomains=sub_file.read().splitlines()
+            subs=Queue()
+            drivers=[]
+
+            for sub in subdomains:
+                subs.put(sub)
+            def start(queue,drivers):
+                options=webdriver.FirefoxOptions()
+                options.headless=True
+                driver=webdriver.Firefox(options=options,)
+
+                while not queue.empty():
+                    sub=queue.get()
+                    get_ss(driver,sub)
+                    drivers.append(driver)
+                driver.close()
+
+            for _ in range(threads):
+                ss_thread=threading.Thread(target=start,args=(subs,drivers,))
+                ss_thread.start()
+
+        elif domain:
             options=webdriver.FirefoxOptions()
             options.headless=True
-            driver=webdriver.Firefox(options=options,)
-            while not queue.empty():
-                sub=queue.get()
-                get_ss(driver,sub)
-                drivers.append(driver)
-            driver.close()
-        for _ in range(threads):
-            ss_thread=threading.Thread(target=start,args=(subs,drivers,))
-            ss_thread.start()
+            driver=webdriver.Firefox(options=options)
+            get_ss(driver,domain)
+
+        else:
+            print("Neither a filename of domain specified [^] \nsuch an imbecile ")
+
     except:
         print("""Usage: main.py ss [OPTIONS]
 
@@ -146,11 +194,12 @@ Options:
 
 
 
-@cli.command()
+@cli.command(help="probe a list of subdomains for alive and the server running")
 @click.option('-fn','--filename',help="filename containing subdomains")
 @click.option('-t','--threads',help="Number of threads",default=10,type=int)
 @click.option('-o','--output',help="Name of the output file")
-def probe(filename,threads,output):
+@click.option('-d','--domain',help="Name of a subdomain format:[-d subdomain.example.com]")
+def probe(filename,threads,domain,output):
     try:
         if filename:
             with open(filename,'r') as subs:
@@ -167,40 +216,64 @@ def probe(filename,threads,output):
                 with open(output,'w') as output_file:
                     while not result.empty():
                         output_file.write(result.get()+'\n')
-                
+        elif domain:
+            flag=False
+            if probe_domain(domain):
+                flag=True
+            if output:
+                if flag:
+                    with open(output,'w') as o:
+                        o.write(domain)
+
         else:
-            print("Filename was not specified make sure to use '-fn' to add a filename \nuse --help for more information...")
+            print("Filename was not specified make sure to use '-fn' to add a filename or -d fot domain \nuse --help for more information...")
+
 
     except:
         print("")
 
-@cli.command()
+
+
+@cli.command(help="Fingerprint a list of subdomains")
 @click.option('-fn','--filename',help="filename containing subdomains")
 @click.option('-o','--output',help="output file")
+@click.option('-d','--domain',help="Name of a subdomain format:[-d subdomain.example.com]")
 @click.option('-ag','--aggression',type=int,help="The level of aggression [1.stealthy, 2.aggressive, 3.heavy] (e.g '-ag 1') default=1",default=1)
-def fingerprint(filename,output,aggression):
+def fingerprint(filename,output,domain,aggression):
     try:
-        result={}
-        with open(filename,'r') as sub_file:
-            subdomains=sub_file.read().splitlines()
-        for sub in subdomains:
-            command=f"whatweb --aggression {aggression} {sub}"
-            fp=get_fingerprint(command)
-            if fp:
-                result[sub]=fp
-            else:
-                result[sub]="Couldn't find anything"
-        for sub, fp in result.items():
-            print(f"------------------------------------{BLUE}scan results for{RED}{BLINK} {sub}{END}------------------------------------")
-            print(fp)
+        if filename:
+            result={}
+            with open(filename,'r') as sub_file:
+                subdomains=sub_file.read().splitlines()
 
+            for sub in subdomains:
+                command=f"whatweb --aggression {aggression} {sub}"
+                fp=get_fingerprint(command)
 
-        if output:
-            with open(output,'w') as op:
-                for sub, fp in result.items():
-                    op.write(f"------------------------------------scan results for {sub}------------------------------------")
-                    op.write(fp)
+                if fp:
+                    result[sub]=fp
+                else:
+                    result[sub]="Couldn't find anything"
 
+            for sub, fp in result.items():
+                print(f"------------------------------------{BLUE}scan results for{RED}{BLINK} {sub}{END}------------------------------------")
+                print(fp)
+
+            if output:
+                with open(output,'w') as op:
+                    for sub, fp in result.items():
+                        op.write(f"------------------------------------scan results for {sub}------------------------------------")
+                        op.write(fp)
+
+        elif domain:
+            command=f"whatweb --aggression {aggression} {domain}"
+            result=get_fingerprint(command)
+            print(result)
+            if output:
+                with open(output,'w') as o:
+                    o.write(result)
+        else:
+            pass
     except:
         print("""Usage: main.py fingerprint [OPTIONS]
 
@@ -218,36 +291,159 @@ Options:
   try:'python main.py fingerprint --filename test.txt'""")
 
 
-@cli.command()
+
+@cli.command(help="Find the active ports using nmap")
 @click.option('-fn','--filename',help="filename containing subdomains")
 @click.option('-o','--output',help="output file")
+@click.option('-d','--domain',help="Name of a subdomain format:[-d subdomain.example.com]")
 @click.option('-st','--scantype',help='change the scan type from nmap[default ="sS"="stealth-scan"]',default="-sS")
-def ports(filename,output,scantype):
+def ports(filename,output,scantype,domain):
     if check_sudo:
-        scan_result={}
-        open_ports=[]
-        with open(filename,'r') as subs:
-            subdomains=subs.read().splitlines()
-        for subdomain in subdomains:
-            print(f"------------------------------------{BLUE}scan results for {RED}{BOLD}{BLINK}{subdomain}{END} ------------------------------------")
-            command=f"nmap {scantype} -p0-65535 {subdomain}"
+        if filename:
+            scan_result={}
+            with open(filename,'r') as subs:
+                subdomains=subs.read().splitlines()
+
+            for subdomain in subdomains:
+                print(f"------------------------------------{BLUE}scan results for {RED}{BOLD}{BLINK}{subdomain}{END} ------------------------------------")
+                command=f"nmap {scantype} -p0-65535 {subdomain}"
+                result=get_ports(command)
+
+                if result:
+                    print(result)
+                    scan_result[subdomain]=result
+
+            if output:
+                with open(output,'w') as op:
+                    for sub,scan in scan_result.items():
+                        op.write(f"------------------------------------scan results for {sub}------------------------------------"+scan +"\n")      
+        
+        elif domain:
+            command=f"nmap {scantype} -p0-65535 {domain}"
+            print(f"------------------------------------{BLUE}scan results for {RED}{BOLD}{BLINK}{domain}{END} ------------------------------------")
             result=get_ports(command)
-            if result:
-                print(result)
-                scan_result[subdomain]=result
-        if output:
-            with open(output,'w') as op:
-                for sub,scan in scan_result.items():
-                    op.write(f"------------------------------------scan results for {sub}------------------------------------"+scan +"\n")      
+            print(result)
+
+            if output:
+                with open(output, 'w') as o:
+                    o.write(result)
+
     else:
         print("The scan requires root previleges\nrun using [sudo] you dummy!!!")   
         exit(0)
 
-@cli.command()
-def run():
-    print("going to do all the work")
+
+
+@cli.command(help="Get the page data of a list of subdomains")
+@click.option('-fn','--filename',help="filename containing subdomains")
+@click.option('-o','--output',help="output file")
+@click.option('-d','--domain',help="Name of a subdomain format:[-d subdomain.example.com]")
+@click.option('-m','--method',help='the method of the request',default='GET')
+def request(filename,output,method,domain):
+    if filename:
+
+        with open(filename,'r') as ofile:
+            urls=ofile.read().splitlines()
+        result={}
+
+        for url in urls:
+            result[url]=get_response(url,method)
+
+        for sub,res in result.items():
+            print(f"------------------------------------{BLUE}scan results for {RED}{BOLD}{BLINK}{sub}{END} ------------------------------------")
+            print(f"{res}")
+
+        if output:
+            with open(output,'w') as out:
+                for sub,res in result:
+                    out.write(f"------------------------------------{BLUE}scan results for {RED}{BOLD}{BLINK}{sub}{END} ------------------------------------ \n {res}")
+
+    if domain:
+        print(f"------------------------------------{BLUE}scan results for {RED}{BOLD}{BLINK}{domain}{END} ------------------------------------")
+        res=get_response(domain,method)
+        print(res)
+
+        if output:  
+            with open(output,'w') as o:
+                o.write(res)
+
+        
+@cli.command(help="Find a list of opensource urls available of a list of subdomains")
+@click.option('-fn','--filename',help="filename containing the subdomains")
+@click.option('-o','--output',help="output file")
+@click.option('-d','--domain',help="Name of a subdomain format:[-d subdomain.example.com]")
+def urls(filename,output,domain):
+    if filename:
+        with open(filename, 'r') as ofile:
+            subs=ofile.read().splitlines()
+        results={}
+        print("This may take a while")
+
+        for sub in subs:
+            command= f"waybackurls {sub}"
+            result=get_urls(command)
+            results[sub]=result
+            print(f"------------------------------------{BLUE}URLs for {RED}{BOLD}{BLINK}{sub}{END} ------------------------------------")
+            print(f"\n{result}")
+
+        if output:
+            with open(output,'w') as ofile:
+                for sub,result in results.items():
+                    ofile.write(f"------------------------------------{BLUE}URLs for {RED}{BOLD}{BLINK}{sub}{END} ------------------------------------")
+                    ofile.write(f"\n{result}")
+
+    elif domain:
+        command=f"waybackurls {domain}"
+        result=get_urls(command)
+        print(result)
+        if output:
+            with open(output,'w') as o:
+                o.write(result)
+
+
+@cli.command(help="run all the scans and put every single subdomain in a single directory")
+@click.option('-fn','--filename',help="Name of the file containing subdomains")
+@click.option('-st','--scantype',help="The scantyp to be used in nmap default = '-sT','stealthscan'",default="-sS")
+@click.option('-m','--method',help="method to be used default = [GET]",default="GET")
+@click.option('-ag','--aggression',type=int,help="The level of aggression [1.stealthy, 2.aggressive, 3.heavy] (e.g '-ag 1') default=1",default=1)
+def run(filename,scantype,method,aggression):
+    if check_sudo():
+        with open(filename,'r') as sfile:
+            subs=sfile.read().splitlines()
+        path=os.getcwd()
+
+        for sub in subs:
+            sub_path=os.path.join(path,sub)
+            os.makedirs(sub_path)
+            os.chdir(sub_path)
+
+            url_command=f"waybackurls {sub}"
+            result=get_urls(url_command)
+            with open("urls.txt",'w') as ufile:
+                ufile.write(result)
+
+            port_command=f"nmap {scantype} -p0-65535 {sub}"
+            result=get_ports(port_command)
+            with open('ports.txt','w') as ports:
+                ports.write(get_ports(port_command))
+
+            result=get_response(sub,method)
+            with open('response.txt','w') as rfile:
+                rfile.write(result)
+
+            fin_command=f"whatweb -aggressive {aggression},{sub}"
+            result=get_fingerprint(fin_command)
+            with open('fingerprint.txt','w') as ffile:
+                ffile.write(result)
+            os.chdir('../')
+        
+    else:
+        print("Run the program through sudo dummy")
 
 
 if __name__ == "__main__":
     print(banner)
     cli()
+
+
+
